@@ -133,7 +133,7 @@ def train(args, model, enc=False):
     co_transform_val = MyCoTransform(enc, augment=False, height=args.height)#512)
     dataset_train = cityscapes(args.datadir, co_transform, 'train')
     dataset_val = cityscapes(args.datadir, co_transform_val, 'val')
-
+    
     loader = DataLoader(dataset_train, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=True)
     loader_val = DataLoader(dataset_val, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
 
@@ -195,7 +195,7 @@ def train(args, model, enc=False):
 
         epoch_loss = []
         time_train = []
-     
+
         doIouTrain = args.iouTrain   
         doIouVal =  args.iouVal      
 
@@ -260,7 +260,7 @@ def train(args, model, enc=False):
                 average = sum(epoch_loss) / len(epoch_loss)
                 print(f'loss: {average:0.4} (epoch: {epoch}, step: {step})', 
                         "// Avg time/img: %.4f s" % (sum(time_train) / len(time_train) / args.batch_size))
-
+            
             
         average_epoch_loss_train = sum(epoch_loss) / len(epoch_loss)
         
@@ -397,10 +397,11 @@ def main(args):
     if not os.path.exists(savedir):
         os.makedirs(savedir)
 
+    # 写入args信息
     with open(savedir + '/opts.txt', "w") as myfile:
         myfile.write(str(args))
 
-    #Load Model
+    # Load Model
     assert os.path.exists(args.model + ".py"), "Error: model definition not found"
     model_file = importlib.import_module(args.model)
     model = model_file.Net(NUM_CLASSES) 

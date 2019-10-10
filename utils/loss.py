@@ -12,7 +12,7 @@ class CrossEntropyLoss2d(torch.nn.Module):
 
     def forward(self, outputs, targets):
         return self.loss(F.log_softmax(outputs, dim=1), targets)
-
+               
 
 
 

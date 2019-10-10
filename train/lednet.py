@@ -46,6 +46,21 @@ class Conv2dBnRelu(nn.Module):
 
 # after Concat -> BN, you also can use Dropout like SS_nbt_module may be make a good result!
 class DownsamplerBlock (nn.Module):
+    """
+    下采样模块
+                  input
+                 /     \    
+            conv/s2    pool/s2
+         (out_c-in_c)  (in_c)
+              |___________|
+                    |
+                  concat
+                  (out_c)
+                    |
+                    bn
+                    |
+                   relu
+    """
     def __init__(self, in_channel, out_channel):
         super().__init__()
 
@@ -62,6 +77,52 @@ class DownsamplerBlock (nn.Module):
 
 
 class SS_nbt_module(nn.Module):
+    """
+    最主要的基础构建模块SS_nbt_module(Split-Shuffle-non-bottleneck Module)
+    构造函数参数：
+            chann: 输入通道数 
+            dropprob: dropout比率
+            dilated: 
+
+    ---------------input
+    |             (in_c)
+    |                |
+    |              split
+    |             /      \   
+    |        input1      input2
+    |       (in_c//2)  (in_c//2)
+    |           |          |
+    |        conv3x1     conv3x1   
+    |           |          |
+    |          relu       relu
+    |           |          |
+    |        conv1x3    conv1x3
+    |           |          | 
+    |           bn        bn
+    |           |          |
+    |          relu       relu
+    |           |          |
+    |    conv3x1(dilated) conv3x1(dilated)
+    |           |          |
+    |          relu       relu
+    |           |          |
+    |    conv1x3(dilated) conv1x3(dilated)
+    |           |          | 
+    |           bn         bn
+    |           |          |
+    |        dropout     dropout
+    |           |__________|
+    |                |
+    |              concat
+    |              (in_c)
+    |________________|
+                    add
+                     |
+                    relu
+                     |
+              channel_shuffle
+                   (in_c)
+    """
     def __init__(self, chann, dropprob, dilated):        
         super().__init__()
 
@@ -139,33 +200,58 @@ class SS_nbt_module(nn.Module):
         return channel_shuffle(out,2)
 
 
-
 class Encoder(nn.Module):
+    """
+             input
+         (1024x512x3)
+               |
+        DownsamplerBlock
+         (512x256x32)
+               |
+        SS_nbt_module x 3
+         (512x256x32)
+               |
+        DownsamplerBlock
+          (256x128x64)
+               |
+        SS_nbt_module x 2
+          (256x128x64)
+               |
+        DownsamplerBlock
+          (128x64x128)
+               |
+        SS_nbt_module x 8
+          (128x64x128)
+    """
     def __init__(self, num_classes):
         super().__init__()
-
+        # input: 1024x512x3  output: 512x256x32
         self.initial_block = DownsamplerBlock(3,32)
 
         self.layers = nn.ModuleList()
 
+        # input: 512x256x32  output: 512x256x32
         for x in range(0, 3):
             self.layers.append(SS_nbt_module(32, 0.03, 1))
-        
 
+        # input: 512x256x32  output: 256x128x64
         self.layers.append(DownsamplerBlock(32,64))
         
-
+        # input: 256x128x64  output: 256x128x64
         for x in range(0, 2):
             self.layers.append(SS_nbt_module(64, 0.03, 1))
-  
+
+        # input: 256x128x64  output: 128x64x128
         self.layers.append(DownsamplerBlock(64,128))
 
+        # input: 128x64x128  output: 128x64x128
         for x in range(0, 1):    
             self.layers.append(SS_nbt_module(128, 0.3, 1))
             self.layers.append(SS_nbt_module(128, 0.3, 2))
             self.layers.append(SS_nbt_module(128, 0.3, 5))
             self.layers.append(SS_nbt_module(128, 0.3, 9))
-            
+        
+        # input: 128x64x128  output: 128x64x128
         for x in range(0, 1):    
             self.layers.append(SS_nbt_module(128, 0.3, 2))
             self.layers.append(SS_nbt_module(128, 0.3, 5))
@@ -183,6 +269,7 @@ class Encoder(nn.Module):
         for layer in self.layers:
             output = layer(output)
 
+        # Only in encoder mode:
         if predict:
             output = self.output_conv(output)
 
@@ -199,8 +286,11 @@ class Interpolate(nn.Module):
         x = self.interp(x,size=self.size,mode=self.mode,align_corners=True)
         return x
         
-
 class APN_Module(nn.Module):
+    """
+    解码器APN_Module(Attention Pyramid Mudule)
+
+    """
     def __init__(self, in_ch, out_ch):
         super(APN_Module, self).__init__()
         # global pooling branch
@@ -212,6 +302,8 @@ class APN_Module(nn.Module):
         self.mid = nn.Sequential(
 		Conv2dBnRelu(in_ch, out_ch, kernel_size=1, stride=1, padding=0)
 	)
+
+        
         self.down1 = Conv2dBnRelu(in_ch, 1, kernel_size=7, stride=2, padding=3)
 		
         self.down2 = Conv2dBnRelu(1, 1, kernel_size=5, stride=2, padding=2)
@@ -228,32 +320,50 @@ class APN_Module(nn.Module):
         
         h = x.size()[2]
         w = x.size()[3]
-        
+
+        ### global pooling branch
+        # input: 128x64x128   output:1x1xC
         b1 = self.branch1(x)
+        # input: 1x1xC   output:128x64xC
         # b1 = Interpolate(size=(h, w), mode="bilinear")(b1)
         b1= interpolate(b1, size=(h, w), mode="bilinear", align_corners=True)
-	
+
+        ### midddle branch
+        # input: 128x64x128   output:128x64xC
         mid = self.mid(x)
 		
+        ### third branch
+        # input: 128x64x128   output:64x32x1
         x1 = self.down1(x)
+        # input: 64x32x1   output:32x16x1
         x2 = self.down2(x1)
+        # input: 32x16x1   output:16x8x1
         x3 = self.down3(x2)
+        # input: 16x8x1   output:32x16x1
         # x3 = Interpolate(size=(h // 4, w // 4), mode="bilinear")(x3)
         x3= interpolate(x3, size=(h // 4, w // 4), mode="bilinear", align_corners=True)	
+        # input: 32x16x1  output:32x16x1
         x2 = self.conv2(x2)
+        # input: 32x16x1/32x16x1  output:32x16x1
         x = x2 + x3
+        # input: 32x16x1  output:64x32x1
         # x = Interpolate(size=(h // 2, w // 2), mode="bilinear")(x)
         x= interpolate(x, size=(h // 2, w // 2), mode="bilinear", align_corners=True)
-       		
+       	# input: 64x32x1  output:64x32x1
         x1 = self.conv1(x1)
+        # input: 64x32x1/64x32x1  output:64x32x1
         x = x + x1
+        # input: 64x32x1  output:128x64x1
         # x = Interpolate(size=(h, w), mode="bilinear")(x)
         x= interpolate(x, size=(h, w), mode="bilinear", align_corners=True)
-        		
+        
+        ### midddle branch与third branch融合
+        # input: 128x64x1/128x64x1  output:128x64x1
         x = torch.mul(x, mid)
-
+        
+        ### 与global pooling branch融合
+        # input: 128x64x1/128x64x20  output:128x64x1
         x = x + b1
-       
        
         return x
           
@@ -289,7 +399,7 @@ class Net(nn.Module):
         else:
             self.encoder = encoder
         self.decoder = Decoder(num_classes)
-
+        
     def forward(self, input, only_encode=False):
         if only_encode:
             return self.encoder.forward(input, predict=True)
